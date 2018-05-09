@@ -8,7 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"websocket"
+
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
 	http_proto "v2ray.com/core/common/protocol/http"
@@ -44,24 +45,22 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		remoteAddr.(*net.TCPAddr).IP = forwardedAddrs[0].IP()
 	}
 
-	h.ln.addConn(h.ln.ctx, newConnection(conn, remoteAddr))
+	h.ln.addConn(newConnection(conn, remoteAddr))
 }
 
 type Listener struct {
 	sync.Mutex
-	ctx       context.Context
 	listener  net.Listener
 	tlsConfig *tls.Config
 	config    *Config
-	addConn   internet.AddConnection
+	addConn   internet.ConnHandler
 }
 
-func ListenWS(ctx context.Context, address net.Address, port net.Port, addConn internet.AddConnection) (internet.Listener, error) {
+func ListenWS(ctx context.Context, address net.Address, port net.Port, addConn internet.ConnHandler) (internet.Listener, error) {
 	networkSettings := internet.TransportSettingsFromContext(ctx)
 	wsSettings := networkSettings.(*Config)
 
 	l := &Listener{
-		ctx:     ctx,
 		config:  wsSettings,
 		addConn: addConn,
 	}
@@ -94,7 +93,7 @@ func (ln *Listener) listenws(address net.Address, port net.Port) error {
 
 	go func() {
 		err := http.Serve(listener, &requestHandler{
-			path: ln.config.GetNormailzedPath(),
+			path: ln.config.GetNormalizedPath(),
 			ln:   ln,
 		})
 		if err != nil {

@@ -4,10 +4,17 @@ import (
 	"context"
 	"sync"
 
+	"v2ray.com/core/common"
+	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/net"
-	"v2ray.com/core/transport/ray"
 )
+
+// Link is a utility for connecting between an inbound and an outbound proxy handler.
+type Link struct {
+	Reader buf.Reader
+	Writer buf.Writer
+}
 
 // Dispatcher is a feature that dispatches inbound requests to outbound handlers based on rules.
 // Dispatcher is required to be registered in a V2Ray instance to make V2Ray function properly.
@@ -15,7 +22,7 @@ type Dispatcher interface {
 	Feature
 
 	// Dispatch returns a Ray for transporting data for the given request.
-	Dispatch(ctx context.Context, dest net.Destination) (ray.InboundRay, error)
+	Dispatch(ctx context.Context, dest net.Destination) (*Link, error)
 }
 
 type syncDispatcher struct {
@@ -23,7 +30,7 @@ type syncDispatcher struct {
 	Dispatcher
 }
 
-func (d *syncDispatcher) Dispatch(ctx context.Context, dest net.Destination) (ray.InboundRay, error) {
+func (d *syncDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*Link, error) {
 	d.RLock()
 	defer d.RUnlock()
 
@@ -45,19 +52,22 @@ func (d *syncDispatcher) Start() error {
 	return d.Dispatcher.Start()
 }
 
-func (d *syncDispatcher) Close() {
+func (d *syncDispatcher) Close() error {
 	d.RLock()
 	defer d.RUnlock()
 
-	if d.Dispatcher != nil {
-		d.Dispatcher.Close()
-	}
+	return common.Close(d.Dispatcher)
 }
 
 func (d *syncDispatcher) Set(disp Dispatcher) {
+	if disp == nil {
+		return
+	}
+
 	d.Lock()
 	defer d.Unlock()
 
+	common.Close(d.Dispatcher)
 	d.Dispatcher = disp
 }
 
@@ -66,7 +76,7 @@ var (
 	ErrNoClue = errors.New("not enough information for making a decision")
 )
 
-// Router is a feature to choose a outbound tag for the given request.
+// Router is a feature to choose an outbound tag for the given request.
 type Router interface {
 	Feature
 
@@ -101,18 +111,21 @@ func (r *syncRouter) Start() error {
 	return r.Router.Start()
 }
 
-func (r *syncRouter) Close() {
+func (r *syncRouter) Close() error {
 	r.RLock()
 	defer r.RUnlock()
 
-	if r.Router != nil {
-		r.Router.Close()
-	}
+	return common.Close(r.Router)
 }
 
 func (r *syncRouter) Set(router Router) {
+	if router == nil {
+		return
+	}
+
 	r.Lock()
 	defer r.Unlock()
 
+	common.Close(r.Router)
 	r.Router = router
 }

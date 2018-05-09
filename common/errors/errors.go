@@ -1,11 +1,14 @@
 // Package errors is a drop-in replacement for Golang lib 'errors'.
-package errors
+package errors // import "v2ray.com/core/common/errors"
 
 import (
+	"context"
+	"os"
 	"strings"
 
 	"v2ray.com/core/common/log"
 	"v2ray.com/core/common/serial"
+	"v2ray.com/core/common/session"
 )
 
 type hasInnerError interface {
@@ -17,12 +20,17 @@ type hasSeverity interface {
 	Severity() log.Severity
 }
 
+type hasContext interface {
+	Context() context.Context
+}
+
 // Error is an error object with underlying error.
 type Error struct {
 	message  []interface{}
 	inner    error
 	severity log.Severity
 	path     []string
+	ctx      context.Context
 }
 
 // Error implements error.Error().
@@ -48,6 +56,27 @@ func (v *Error) Inner() error {
 func (v *Error) Base(err error) *Error {
 	v.inner = err
 	return v
+}
+
+func (v *Error) WithContext(ctx context.Context) *Error {
+	v.ctx = ctx
+	return v
+}
+
+func (v *Error) Context() context.Context {
+	if v.ctx != nil {
+		return v.ctx
+	}
+
+	if v.inner == nil {
+		return nil
+	}
+
+	if c, ok := v.inner.(hasContext); ok {
+		return c.Context()
+	}
+
+	return nil
 }
 
 func (v *Error) atSeverity(s log.Severity) *Error {
@@ -103,9 +132,21 @@ func (v *Error) String() string {
 
 // WriteToLog writes current error into log.
 func (v *Error) WriteToLog() {
+	ctx := v.Context()
+	var sid session.ID
+	if ctx != nil {
+		sid = session.IDFromContext(ctx)
+	}
+	var c interface{} = v
+	if sid > 0 {
+		c = sessionLog{
+			id:      sid,
+			content: v,
+		}
+	}
 	log.Record(&log.GeneralMessage{
 		Severity: GetSeverity(v),
-		Content:  v,
+		Content:  c,
 	})
 }
 
@@ -122,12 +163,27 @@ func Cause(err error) error {
 	if err == nil {
 		return nil
 	}
+L:
 	for {
-		inner, ok := err.(hasInnerError)
-		if !ok || inner.Inner() == nil {
-			break
+		switch inner := err.(type) {
+		case hasInnerError:
+			if inner.Inner() == nil {
+				break L
+			}
+			err = inner.Inner()
+		case *os.PathError:
+			if inner.Err == nil {
+				break L
+			}
+			err = inner.Err
+		case *os.SyscallError:
+			if inner.Err == nil {
+				break L
+			}
+			err = inner.Err
+		default:
+			break L
 		}
-		err = inner.Inner()
 	}
 	return err
 }
@@ -138,4 +194,13 @@ func GetSeverity(err error) log.Severity {
 		return s.Severity()
 	}
 	return log.Severity_Info
+}
+
+type sessionLog struct {
+	id      session.ID
+	content interface{}
+}
+
+func (s sessionLog) String() string {
+	return serial.Concat("[", s.id, "] ", s.content)
 }

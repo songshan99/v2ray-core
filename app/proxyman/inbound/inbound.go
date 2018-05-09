@@ -19,20 +19,19 @@ type Manager struct {
 	running         bool
 }
 
+// New returns a new Manager for inbound handlers.
 func New(ctx context.Context, config *proxyman.InboundConfig) (*Manager, error) {
 	m := &Manager{
 		taggedHandlers: make(map[string]core.InboundHandler),
 	}
-	v := core.FromContext(ctx)
-	if v == nil {
-		return nil, newError("V is not in context")
-	}
+	v := core.MustFromContext(ctx)
 	if err := v.RegisterFeature((*core.InboundHandlerManager)(nil), m); err != nil {
 		return nil, newError("unable to register InboundHandlerManager").Base(err)
 	}
 	return m, nil
 }
 
+// AddHandler implements core.InboundHandlerManager.
 func (m *Manager) AddHandler(ctx context.Context, handler core.InboundHandler) error {
 	m.access.Lock()
 	defer m.access.Unlock()
@@ -51,6 +50,7 @@ func (m *Manager) AddHandler(ctx context.Context, handler core.InboundHandler) e
 	return nil
 }
 
+// GetHandler implements core.InboundHandlerManager.
 func (m *Manager) GetHandler(ctx context.Context, tag string) (core.InboundHandler, error) {
 	m.access.RLock()
 	defer m.access.RUnlock()
@@ -62,6 +62,7 @@ func (m *Manager) GetHandler(ctx context.Context, tag string) (core.InboundHandl
 	return handler, nil
 }
 
+// RemoveHandler implements core.InboundHandlerManager.
 func (m *Manager) RemoveHandler(ctx context.Context, tag string) error {
 	if len(tag) == 0 {
 		return core.ErrNoClue
@@ -71,7 +72,9 @@ func (m *Manager) RemoveHandler(ctx context.Context, tag string) error {
 	defer m.access.Unlock()
 
 	if handler, found := m.taggedHandlers[tag]; found {
-		handler.Close()
+		if err := handler.Close(); err != nil {
+			newError("failed to close handler ", tag).Base(err).AtWarning().WithContext(ctx).WriteToLog()
+		}
 		delete(m.taggedHandlers, tag)
 		return nil
 	}
@@ -79,6 +82,7 @@ func (m *Manager) RemoveHandler(ctx context.Context, tag string) error {
 	return core.ErrNoClue
 }
 
+// Start implements common.Runnable.
 func (m *Manager) Start() error {
 	m.access.Lock()
 	defer m.access.Unlock()
@@ -99,7 +103,8 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-func (m *Manager) Close() {
+// Close implements common.Closable.
+func (m *Manager) Close() error {
 	m.access.Lock()
 	defer m.access.Unlock()
 
@@ -111,22 +116,27 @@ func (m *Manager) Close() {
 	for _, handler := range m.untaggedHandler {
 		handler.Close()
 	}
+
+	return nil
 }
 
+// NewHandler creates a new core.InboundHandler based on the given config.
 func NewHandler(ctx context.Context, config *core.InboundHandlerConfig) (core.InboundHandler, error) {
 	rawReceiverSettings, err := config.ReceiverSettings.GetInstance()
 	if err != nil {
 		return nil, err
-	}
-	receiverSettings, ok := rawReceiverSettings.(*proxyman.ReceiverConfig)
-	if !ok {
-		return nil, newError("not a ReceiverConfig").AtError()
 	}
 	proxySettings, err := config.ProxySettings.GetInstance()
 	if err != nil {
 		return nil, err
 	}
 	tag := config.Tag
+
+	receiverSettings, ok := rawReceiverSettings.(*proxyman.ReceiverConfig)
+	if !ok {
+		return nil, newError("not a ReceiverConfig").AtError()
+	}
+
 	allocStrategy := receiverSettings.AllocationStrategy
 	if allocStrategy == nil || allocStrategy.Type == proxyman.AllocationStrategy_Always {
 		return NewAlwaysOnInboundHandler(ctx, tag, receiverSettings, proxySettings)

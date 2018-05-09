@@ -10,52 +10,61 @@ import (
 	"google.golang.org/grpc"
 	"v2ray.com/core"
 	"v2ray.com/core/common"
+	"v2ray.com/core/common/signal"
 )
 
+// Commander is a V2Ray feature that provides gRPC methods to external clients.
 type Commander struct {
 	sync.Mutex
-	server    *grpc.Server
-	config    Config
-	ohm       core.OutboundHandlerManager
-	callbacks []core.ServiceRegistryCallback
+	server *grpc.Server
+	config Config
+	v      *core.Instance
+	ohm    core.OutboundHandlerManager
 }
 
+// NewCommander creates a new Commander based on the given config.
 func NewCommander(ctx context.Context, config *Config) (*Commander, error) {
-	v := core.FromContext(ctx)
-	if v == nil {
-		return nil, newError("V is not in context.")
-	}
+	v := core.MustFromContext(ctx)
 	c := &Commander{
 		config: *config,
 		ohm:    v.OutboundHandlerManager(),
+		v:      v,
 	}
-	if err := v.RegisterFeature((*core.Commander)(nil), c); err != nil {
+	if err := v.RegisterFeature((*Commander)(nil), c); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
-func (c *Commander) RegisterService(callback core.ServiceRegistryCallback) {
-	c.Lock()
-	defer c.Unlock()
-
-	if callback == nil {
-		return
-	}
-
-	c.callbacks = append(c.callbacks, callback)
+// Type implements common.HasType.
+func (c *Commander) Type() interface{} {
+	return (*Commander)(nil)
 }
 
+// Start implements common.Runnable.
 func (c *Commander) Start() error {
 	c.Lock()
 	c.server = grpc.NewServer()
-	for _, callback := range c.callbacks {
-		callback(c.server)
+	for _, rawConfig := range c.config.Service {
+		config, err := rawConfig.GetInstance()
+		if err != nil {
+			return err
+		}
+		rawService, err := c.v.CreateObject(config)
+		if err != nil {
+			return err
+		}
+		service, ok := rawService.(Service)
+		if !ok {
+			return newError("not a Service.")
+		}
+		service.Register(c.server)
 	}
 	c.Unlock()
 
 	listener := &OutboundListener{
 		buffer: make(chan net.Conn, 4),
+		done:   signal.NewDone(),
 	}
 
 	go func() {
@@ -64,15 +73,18 @@ func (c *Commander) Start() error {
 		}
 	}()
 
-	c.ohm.RemoveHandler(context.Background(), c.config.Tag)
-	c.ohm.AddHandler(context.Background(), &CommanderOutbound{
+	if err := c.ohm.RemoveHandler(context.Background(), c.config.Tag); err != nil {
+		newError("failed to remove existing handler").WriteToLog()
+	}
+
+	return c.ohm.AddHandler(context.Background(), &Outbound{
 		tag:      c.config.Tag,
 		listener: listener,
 	})
-	return nil
 }
 
-func (c *Commander) Close() {
+// Close implements common.Closable.
+func (c *Commander) Close() error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -80,6 +92,8 @@ func (c *Commander) Close() {
 		c.server.Stop()
 		c.server = nil
 	}
+
+	return nil
 }
 
 func init() {

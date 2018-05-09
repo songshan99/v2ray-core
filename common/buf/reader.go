@@ -3,6 +3,7 @@ package buf
 import (
 	"io"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
 )
 
@@ -12,130 +13,140 @@ type BytesToBufferReader struct {
 	buffer []byte
 }
 
+// NewBytesToBufferReader returns a new BytesToBufferReader.
 func NewBytesToBufferReader(reader io.Reader) Reader {
 	return &BytesToBufferReader{
 		Reader: reader,
 	}
 }
 
-const mediumSize = 8 * 1024
-const largeSize = 64 * 1024
-
 func (r *BytesToBufferReader) readSmall() (MultiBuffer, error) {
 	b := New()
-	err := b.Reset(ReadFrom(r.Reader))
-	if b.IsFull() {
-		r.buffer = make([]byte, mediumSize)
+	for i := 0; i < 64; i++ {
+		err := b.Reset(ReadFrom(r.Reader))
+		if b.IsFull() && largeSize > Size {
+			r.buffer = newBytes(Size + 1)
+		}
+		if !b.IsEmpty() {
+			return NewMultiBufferValue(b), nil
+		}
+		if err != nil {
+			b.Release()
+			return nil, err
+		}
 	}
-	if !b.IsEmpty() {
-		return NewMultiBufferValue(b), nil
-	}
-	b.Release()
-	return nil, err
+
+	return nil, newError("Reader returns too many empty payloads.")
+}
+
+func (r *BytesToBufferReader) freeBuffer() {
+	freeBytes(r.buffer)
+	r.buffer = nil
 }
 
 // ReadMultiBuffer implements Reader.
 func (r *BytesToBufferReader) ReadMultiBuffer() (MultiBuffer, error) {
-	if r.buffer == nil {
+	if r.buffer == nil || largeSize == Size {
 		return r.readSmall()
 	}
 
 	nBytes, err := r.Reader.Read(r.buffer)
 	if nBytes > 0 {
-		mb := NewMultiBufferCap(nBytes/Size + 1)
-		mb.Write(r.buffer[:nBytes])
-		if nBytes == len(r.buffer) && len(r.buffer) == mediumSize {
-			r.buffer = make([]byte, largeSize)
+		mb := NewMultiBufferCap(int32(nBytes/Size) + 1)
+		common.Must2(mb.Write(r.buffer[:nBytes]))
+		if nBytes == len(r.buffer) && nBytes < int(largeSize) {
+			freeBytes(r.buffer)
+			r.buffer = newBytes(int32(nBytes) + 1)
+		} else if nBytes < Size {
+			r.freeBuffer()
 		}
 		return mb, nil
 	}
-	return nil, err
-}
 
-var (
-	_ Reader        = (*BufferedReader)(nil)
-	_ io.Reader     = (*BufferedReader)(nil)
-	_ io.ByteReader = (*BufferedReader)(nil)
-	_ io.WriterTo   = (*BufferedReader)(nil)
-)
+	r.freeBuffer()
 
-type BufferedReader struct {
-	stream   Reader
-	leftOver MultiBuffer
-	buffered bool
-}
-
-func NewBufferedReader(reader Reader) *BufferedReader {
-	return &BufferedReader{
-		stream:   reader,
-		buffered: true,
+	if err != nil {
+		return nil, err
 	}
+
+	// Read() returns empty payload and nil err. We don't expect this to happen, but just in case.
+	return r.readSmall()
 }
 
-func (r *BufferedReader) SetBuffered(f bool) {
-	r.buffered = f
+// BufferedReader is a Reader that keeps its internal buffer.
+type BufferedReader struct {
+	// Reader is the underlying reader to be read from
+	Reader Reader
+	// Buffer is the internal buffer to be read from first
+	Buffer MultiBuffer
+	// Direct indicates whether or not to use the internal buffer
+	Direct bool
 }
 
-func (r *BufferedReader) IsBuffered() bool {
-	return r.buffered
+// BufferedBytes returns the number of bytes that is cached in this reader.
+func (r *BufferedReader) BufferedBytes() int32 {
+	return r.Buffer.Len()
 }
 
+// ReadByte implements io.ByteReader.
 func (r *BufferedReader) ReadByte() (byte, error) {
 	var b [1]byte
 	_, err := r.Read(b[:])
 	return b[0], err
 }
 
+// Read implements io.Reader. It reads from internal buffer first (if available) and then reads from the underlying reader.
 func (r *BufferedReader) Read(b []byte) (int, error) {
-	if r.leftOver != nil {
-		nBytes, _ := r.leftOver.Read(b)
-		if r.leftOver.IsEmpty() {
-			r.leftOver.Release()
-			r.leftOver = nil
+	if r.Buffer != nil {
+		nBytes, _ := r.Buffer.Read(b)
+		if r.Buffer.IsEmpty() {
+			r.Buffer.Release()
+			r.Buffer = nil
 		}
 		return nBytes, nil
 	}
 
-	if !r.buffered {
-		if reader, ok := r.stream.(io.Reader); ok {
+	if r.Direct {
+		if reader, ok := r.Reader.(io.Reader); ok {
 			return reader.Read(b)
 		}
 	}
 
-	mb, err := r.stream.ReadMultiBuffer()
+	mb, err := r.Reader.ReadMultiBuffer()
 	if mb != nil {
 		nBytes, _ := mb.Read(b)
 		if !mb.IsEmpty() {
-			r.leftOver = mb
+			r.Buffer = mb
 		}
 		return nBytes, err
 	}
 	return 0, err
 }
 
+// ReadMultiBuffer implements Reader.
 func (r *BufferedReader) ReadMultiBuffer() (MultiBuffer, error) {
-	if r.leftOver != nil {
-		mb := r.leftOver
-		r.leftOver = nil
+	if r.Buffer != nil {
+		mb := r.Buffer
+		r.Buffer = nil
 		return mb, nil
 	}
 
-	return r.stream.ReadMultiBuffer()
+	return r.Reader.ReadMultiBuffer()
 }
 
 // ReadAtMost returns a MultiBuffer with at most size.
-func (r *BufferedReader) ReadAtMost(size int) (MultiBuffer, error) {
-	if r.leftOver == nil {
-		mb, err := r.stream.ReadMultiBuffer()
+func (r *BufferedReader) ReadAtMost(size int32) (MultiBuffer, error) {
+	if r.Buffer == nil {
+		mb, err := r.Reader.ReadMultiBuffer()
 		if mb.IsEmpty() && err != nil {
 			return nil, err
 		}
-		r.leftOver = mb
+		r.Buffer = mb
 	}
 
-	mb := r.leftOver.SliceBySize(size)
-	if r.leftOver.IsEmpty() {
-		r.leftOver = nil
+	mb := r.Buffer.SliceBySize(size)
+	if r.Buffer.IsEmpty() {
+		r.Buffer = nil
 	}
 	return mb, nil
 }
@@ -143,15 +154,16 @@ func (r *BufferedReader) ReadAtMost(size int) (MultiBuffer, error) {
 func (r *BufferedReader) writeToInternal(writer io.Writer) (int64, error) {
 	mbWriter := NewWriter(writer)
 	totalBytes := int64(0)
-	if r.leftOver != nil {
-		totalBytes += int64(r.leftOver.Len())
-		if err := mbWriter.WriteMultiBuffer(r.leftOver); err != nil {
+	if r.Buffer != nil {
+		totalBytes += int64(r.Buffer.Len())
+		if err := mbWriter.WriteMultiBuffer(r.Buffer); err != nil {
 			return 0, err
 		}
+		r.Buffer = nil
 	}
 
 	for {
-		mb, err := r.stream.ReadMultiBuffer()
+		mb, err := r.Reader.ReadMultiBuffer()
 		if mb != nil {
 			totalBytes += int64(mb.Len())
 			if werr := mbWriter.WriteMultiBuffer(mb); werr != nil {
@@ -164,10 +176,19 @@ func (r *BufferedReader) writeToInternal(writer io.Writer) (int64, error) {
 	}
 }
 
+// WriteTo implements io.WriterTo.
 func (r *BufferedReader) WriteTo(writer io.Writer) (int64, error) {
 	nBytes, err := r.writeToInternal(writer)
 	if errors.Cause(err) == io.EOF {
 		return nBytes, nil
 	}
 	return nBytes, err
+}
+
+// Close implements io.Closer.
+func (r *BufferedReader) Close() error {
+	if !r.Buffer.IsEmpty() {
+		r.Buffer.Release()
+	}
+	return common.Close(r.Reader)
 }

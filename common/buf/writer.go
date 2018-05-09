@@ -3,6 +3,7 @@ package buf
 import (
 	"io"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
 )
 
@@ -11,6 +12,7 @@ type BufferToBytesWriter struct {
 	io.Writer
 }
 
+// NewBufferToBytesWriter returns a new BufferToBytesWriter.
 func NewBufferToBytesWriter(writer io.Writer) *BufferToBytesWriter {
 	return &BufferToBytesWriter{
 		Writer: writer,
@@ -22,8 +24,7 @@ func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	defer mb.Release()
 
 	bs := mb.ToNetBuffers()
-	_, err := bs.WriteTo(w)
-	return err
+	return common.Error2(bs.WriteTo(w.Writer))
 }
 
 // ReadFrom implements io.ReaderFrom.
@@ -49,9 +50,9 @@ func NewBufferedWriter(writer Writer) *BufferedWriter {
 	}
 }
 
+// WriteByte implements io.ByteWriter.
 func (w *BufferedWriter) WriteByte(c byte) error {
-	_, err := w.Write([]byte{c})
-	return err
+	return common.Error2(w.Write([]byte{c}))
 }
 
 // Write implements io.Writer.
@@ -121,6 +122,7 @@ func (w *BufferedWriter) Flush() error {
 	return nil
 }
 
+// SetBuffered sets whether the internal buffer is used. If set to false, Flush() will be called to clear the buffer.
 func (w *BufferedWriter) SetBuffered(f bool) error {
 	w.buffered = f
 	if !f {
@@ -138,6 +140,14 @@ func (w *BufferedWriter) ReadFrom(reader io.Reader) (int64, error) {
 	var sc SizeCounter
 	err := Copy(NewReader(reader), w, CountSize(&sc))
 	return sc.Size, err
+}
+
+// Close implements io.Closable.
+func (w *BufferedWriter) Close() error {
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	return common.Close(w.writer)
 }
 
 type seqWriter struct {

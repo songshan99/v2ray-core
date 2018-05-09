@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"v2ray.com/core/common/net"
-	tlsgen "v2ray.com/core/testing/tls"
+	"v2ray.com/core/common/protocol/tls/cert"
 	"v2ray.com/core/transport/internet"
-	v2tls "v2ray.com/core/transport/internet/tls"
+	"v2ray.com/core/transport/internet/tls"
 	. "v2ray.com/core/transport/internet/websocket"
 	. "v2ray.com/ext/assert"
 )
@@ -18,7 +18,7 @@ func Test_listenWSAndDial(t *testing.T) {
 	assert := With(t)
 	listen, err := ListenWS(internet.ContextWithTransportSettings(context.Background(), &Config{
 		Path: "ws",
-	}), net.DomainAddress("localhost"), 13146, func(ctx context.Context, conn internet.Connection) bool {
+	}), net.DomainAddress("localhost"), 13146, func(conn internet.Connection) {
 		go func(c internet.Connection) {
 			defer c.Close()
 
@@ -33,7 +33,6 @@ func Test_listenWSAndDial(t *testing.T) {
 			_, err = c.Write([]byte("Response"))
 			assert(err, IsNil)
 		}(conn)
-		return true
 	})
 	assert(err, IsNil)
 
@@ -67,7 +66,7 @@ func TestDialWithRemoteAddr(t *testing.T) {
 	assert := With(t)
 	listen, err := ListenWS(internet.ContextWithTransportSettings(context.Background(), &Config{
 		Path: "ws",
-	}), net.DomainAddress("localhost"), 13148, func(ctx context.Context, conn internet.Connection) bool {
+	}), net.DomainAddress("localhost"), 13148, func(conn internet.Connection) {
 		go func(c internet.Connection) {
 			defer c.Close()
 
@@ -84,7 +83,6 @@ func TestDialWithRemoteAddr(t *testing.T) {
 			_, err = c.Write([]byte("Response"))
 			assert(err, IsNil)
 		}(conn)
-		return true
 	})
 	assert(err, IsNil)
 
@@ -111,15 +109,14 @@ func Test_listenWSAndDial_TLS(t *testing.T) {
 	ctx := internet.ContextWithTransportSettings(context.Background(), &Config{
 		Path: "wss",
 	})
-	ctx = internet.ContextWithSecuritySettings(ctx, &v2tls.Config{
+	ctx = internet.ContextWithSecuritySettings(ctx, &tls.Config{
 		AllowInsecure: true,
-		Certificate:   []*v2tls.Certificate{tlsgen.GenerateCertificateForTest()},
+		Certificate:   []*tls.Certificate{tls.ParseCertificate(cert.MustGenerate(nil, cert.CommonName("localhost")))},
 	})
-	listen, err := ListenWS(ctx, net.DomainAddress("localhost"), 13143, func(ctx context.Context, conn internet.Connection) bool {
+	listen, err := ListenWS(ctx, net.DomainAddress("localhost"), 13143, func(conn internet.Connection) {
 		go func() {
 			_ = conn.Close()
 		}()
-		return true
 	})
 	assert(err, IsNil)
 	defer listen.Close()

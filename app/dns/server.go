@@ -11,6 +11,7 @@ import (
 	"v2ray.com/core"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/signal"
 )
 
 const (
@@ -27,16 +28,12 @@ func (r *DomainRecord) Expired() bool {
 	return r.Expire.Before(time.Now())
 }
 
-func (r *DomainRecord) Inactive() bool {
-	now := time.Now()
-	return r.Expire.Before(now) || r.LastAccess.Add(time.Minute*5).Before(now)
-}
-
 type Server struct {
 	sync.Mutex
 	hosts   map[string]net.IP
 	records map[string]*DomainRecord
 	servers []NameServer
+	task    *signal.PeriodicTask
 }
 
 func New(ctx context.Context, config *Config) (*Server, error) {
@@ -45,11 +42,14 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 		servers: make([]NameServer, len(config.NameServers)),
 		hosts:   config.GetInternalHosts(),
 	}
-	v := core.FromContext(ctx)
-	if v == nil {
-		return nil, newError("V is not in context.")
+	server.task = &signal.PeriodicTask{
+		Interval: time.Minute * 10,
+		Execute: func() error {
+			server.cleanup()
+			return nil
+		},
 	}
-
+	v := core.MustFromContext(ctx)
 	if err := v.RegisterFeature((*core.DNSClient)(nil), server); err != nil {
 		return nil, newError("unable to register DNSClient.").Base(err)
 	}
@@ -75,15 +75,14 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 	return server, nil
 }
 
-func (*Server) Interface() interface{} {
-	return (*Server)(nil)
-}
-
+// Start implements common.Runnable.
 func (s *Server) Start() error {
-	return nil
+	return s.task.Start()
 }
 
-func (*Server) Close() {
+// Close implements common.Closable.
+func (s *Server) Close() error {
+	return s.task.Close()
 }
 
 func (s *Server) GetCached(domain string) []net.IP {
@@ -97,20 +96,18 @@ func (s *Server) GetCached(domain string) []net.IP {
 	return nil
 }
 
-func (s *Server) tryCleanup() {
+func (s *Server) cleanup() {
 	s.Lock()
 	defer s.Unlock()
 
-	if len(s.records) > 256 {
-		domains := make([]string, 0, 256)
-		for d, r := range s.records {
-			if r.Expired() {
-				domains = append(domains, d)
-			}
-		}
-		for _, d := range domains {
+	for d, r := range s.records {
+		if r.Expired() {
 			delete(s.records, d)
 		}
+	}
+
+	if len(s.records) == 0 {
+		s.records = make(map[string]*DomainRecord)
 	}
 }
 
@@ -124,8 +121,6 @@ func (s *Server) LookupIP(domain string) ([]net.IP, error) {
 	if ips != nil {
 		return ips, nil
 	}
-
-	s.tryCleanup()
 
 	for _, server := range s.servers {
 		response := server.QueryA(domain)
